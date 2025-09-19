@@ -1,0 +1,95 @@
+# Project: Secure File Vault System  
+A production-grade file storage and sharing system with deduplication, sharing, search, observability, and admin controls.
+
+---
+
+## Tech Stack (Strict)  
+- Backend: Go (Golang)  
+- API Layer: GraphQL (preferred) or REST  
+- Database: PostgreSQL  
+- Frontend: React.js + TypeScript  
+- Storage Backend: Azure Blob Storage (Azurite for local, Azure Blob for prod)  
+- Containerization: Docker Compose  
+- CI/CD: GitHub Actions (linting, tests, builds, deploys)  
+
+---
+
+## Core Features  
+
+### 1. File Deduplication  
+- SHA-256 based hashing.  
+- Reference counting at blob level.  
+- Track and display storage saved per user.  
+
+### 2. File Uploads  
+- Single + multiple file uploads.  
+- Drag-and-drop UI.  
+- Chunked uploads for files >100MB.  
+- MIME sniffing (real vs declared).  
+- Configurable max file size.  
+
+### 3. File Management & Sharing  
+- File listing with metadata (size, type, uploader, date, dedup info).  
+- (Optional) Folder hierarchy.  
+- Sharing options:  
+  - Public link (Azure SAS URL with expiry).  
+  - Private (owner only).  
+  - Per-user/org access (RBAC-aware).  
+- Public files: track download counters.  
+- Secure deletion: decrement refcount → garbage collect if zero.  
+
+### 4. Search & Filtering  
+- Search by filename.  
+- Filters: MIME type, size range, date range, tags, uploader.  
+- Combine multiple filters.  
+- Optimized with PostgreSQL indexes + full-text search.  
+
+### 5. Rate Limiting & Quotas  
+- Token bucket: 2 req/s per user (configurable).  
+- Storage quota: 10 MB per user (configurable).  
+- Structured JSON error responses.  
+
+### 6. Storage Statistics  
+- Logical storage (user’s perspective).  
+- Physical storage (deduped).  
+- Display savings (bytes + %).  
+- Admins: global usage metrics.  
+
+### 7. Admin Panel  
+- Upload + share files.  
+- View all files + owners.  
+- Track download counts + usage stats.  
+- Analytics dashboard: charts (uploads over time, dedup ratio, quotas).  
+- Manage users, organizations, quotas.  
+
+---
+
+## Permissions & Access Control  
+- Linux-style: **Owner / Group / Others**.  
+- Organizations:  
+  - Users can belong to multiple orgs.  
+  - Creator is org admin.  
+  - Admin can invite/remove users.  
+- RBAC (future-ready): Roles → admin, editor, viewer.  
+- Extendable ACL model for fine-grained control.  
+
+---
+
+## Security & Compliance  
+- JWT authentication + middleware.  
+- Passwords hashed with Argon2id or bcrypt.  
+- HTTPS enforced (TLS).  
+- CSRF protection on frontend.  
+- Signed URLs (Azure SAS) for secure downloads.  
+- Virus scanning (ClamAV container).  
+- Audit logging: uploads, downloads, deletions, admin actions.  
+- Data retention policies + GDPR compliance hooks.  
+
+---
+
+## Observability  
+- Logging: structured JSON (user_id, req_id, action).  
+- Metrics: Prometheus (req/sec, upload sizes, dedup hits).  
+- Tracing: OpenTelemetry + Jaeger.  
+- Dashboards: Grafana (usage stats, error rates).  
+- Alerts: error spikes, quota breaches, low disk space.  

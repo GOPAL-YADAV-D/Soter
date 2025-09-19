@@ -1,0 +1,204 @@
+version: '3.8'
+
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15-alpine
+    container_name: soter-postgres
+    environment:
+      POSTGRES_DB: soter
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./infra/postgres/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+      - ./infra/postgres/postgresql.conf:/etc/postgresql/postgresql.conf:ro
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d soter"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - soter-network
+    restart: unless-stopped
+
+  # Azurite (Azure Blob Storage Emulator)
+  azurite:
+    image: mcr.microsoft.com/azure-storage/azurite:latest
+    container_name: soter-azurite
+    command: "azurite --blobHost 0.0.0.0 --blobPort 10000 --queueHost 0.0.0.0 --queuePort 10001 --tableHost 0.0.0.0 --tablePort 10002 --location /workspace --debug /workspace/debug.log"
+    volumes:
+      - azurite_data:/workspace
+    ports:
+      - "10000:10000"  # Blob service
+      - "10001:10001"  # Queue service  
+      - "10002:10002"  # Table service
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:10000/devstoreaccount1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - soter-network
+    restart: unless-stopped
+
+  # Go Backend
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: soter-backend
+    environment:
+      # Database
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_USER: postgres
+      DB_PASSWORD: password
+      DB_NAME: soter
+      DB_SSLMODE: disable
+      
+      # Azure Storage (Azurite)
+      AZURE_STORAGE_ACCOUNT: devstoreaccount1
+      AZURE_STORAGE_KEY: Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==
+      AZURE_STORAGE_CONTAINER: files
+      AZURE_STORAGE_ENDPOINT: http://azurite:10000/devstoreaccount1
+      
+      # Application
+      PORT: 8080
+      HOST: 0.0.0.0
+      JWT_SECRET: your-super-secret-jwt-key-change-this-in-production
+      LOG_LEVEL: info
+      
+      # Rate Limiting & Quotas
+      RATE_LIMIT_RPS: 2
+      RATE_LIMIT_BURST: 5
+      STORAGE_QUOTA_MB: 10
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      azurite:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    networks:
+      - soter-network
+    restart: unless-stopped
+    volumes:
+      - ./backend/logs:/app/logs
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+        reservations:
+          memory: 256M
+
+  # React Frontend
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: soter-frontend
+    environment:
+      REACT_APP_API_URL: http://localhost:8080
+      REACT_APP_GRAPHQL_URL: http://localhost:8080/query
+    ports:
+      - "3000:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:80"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    networks:
+      - soter-network
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+        reservations:
+          memory: 128M
+
+  # Prometheus (Metrics Collection)
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: soter-prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention.time=200h'
+      - '--web.enable-lifecycle'
+    volumes:
+      - ./infra/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+    depends_on:
+      - backend
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:9090/-/healthy"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    networks:
+      - soter-network
+    restart: unless-stopped
+
+  # Grafana (Metrics Visualization)
+  grafana:
+    image: grafana/grafana:latest
+    container_name: soter-grafana
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin123
+      GF_USERS_ALLOW_SIGN_UP: false
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./infra/grafana/provisioning:/etc/grafana/provisioning:ro
+    ports:
+      - "3001:3000"
+    depends_on:
+      - prometheus
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:3000/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    networks:
+      - soter-network
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+    driver: local
+  azurite_data:
+    driver: local
+  prometheus_data:
+    driver: local
+  grafana_data:
+    driver: local
+
+networks:
+  soter-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16

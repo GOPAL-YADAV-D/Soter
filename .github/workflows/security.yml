@@ -1,0 +1,80 @@
+name: Security Scan
+
+on:
+  schedule:
+    # Run security scan daily at 2 AM UTC
+    - cron: '0 2 * * *'
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  dependency-scan:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+
+    # Go dependency scanning
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: '1.21'
+
+    - name: Run Nancy (Go dependency scanner)
+      working-directory: ./backend
+      run: |
+        go install github.com/sonatypecommunity/nancy@latest
+        go list -m all | nancy sleuth
+
+    # Node.js dependency scanning  
+    - name: Set up Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+
+    - name: Install npm dependencies
+      working-directory: ./frontend
+      run: npm ci
+
+    - name: Run npm audit
+      working-directory: ./frontend
+      run: npm audit --audit-level moderate
+
+  # Container image scanning
+  container-scan:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Build backend image for scanning
+      run: docker build -t soter-backend:scan ./backend
+
+    - name: Build frontend image for scanning
+      run: docker build -t soter-frontend:scan ./frontend
+
+    - name: Scan backend image
+      uses: aquasecurity/trivy-action@master
+      with:
+        image-ref: 'soter-backend:scan'
+        format: 'sarif'
+        output: 'backend-scan.sarif'
+
+    - name: Scan frontend image
+      uses: aquasecurity/trivy-action@master
+      with:
+        image-ref: 'soter-frontend:scan'
+        format: 'sarif'
+        output: 'frontend-scan.sarif'
+
+    - name: Upload backend scan results
+      uses: github/codeql-action/upload-sarif@v2
+      with:
+        sarif_file: 'backend-scan.sarif'
+
+    - name: Upload frontend scan results
+      uses: github/codeql-action/upload-sarif@v2
+      with:
+        sarif_file: 'frontend-scan.sarif'

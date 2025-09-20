@@ -1,18 +1,67 @@
 import React from 'react';
+import { useAuth } from '../context/AuthContext';
 import HealthCard from '../components/HealthCard';
 
 const Dashboard: React.FC = () => {
+  const { user, logout } = useAuth();
+
+  const handleLogout = () => {
+    logout();
+  };
+
   return (
     <div>
       <header className="header">
-        <div className="container">
+        <div className="container" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <h1>Soter - Secure File Vault</h1>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '15px' }}>
+            <span style={{ color: '#666' }}>Welcome, {user?.name}</span>
+            <button 
+              onClick={handleLogout}
+              style={{
+                background: '#dc3545',
+                color: 'white',
+                border: 'none',
+                padding: '8px 16px',
+                borderRadius: '4px',
+                cursor: 'pointer'
+              }}
+            >
+              Logout
+            </button>
+          </div>
         </div>
       </header>
       
       <div className="container">
         <div className="dashboard">
           <HealthCard />
+          
+          <div className="card">
+            <h2>Account Information</h2>
+            <div className="metric">
+              <span className="metric-label">Name:</span>
+              <span className="metric-value">{user?.name}</span>
+            </div>
+            <div className="metric">
+              <span className="metric-label">Username:</span>
+              <span className="metric-value">{user?.username}</span>
+            </div>
+            <div className="metric">
+              <span className="metric-label">Email:</span>
+              <span className="metric-value">{user?.email}</span>
+            </div>
+            <div className="metric">
+              <span className="metric-label">Storage Quota:</span>
+              <span className="metric-value">{user?.storageQuotaMB} MB</span>
+            </div>
+            <div className="metric">
+              <span className="metric-label">Status:</span>
+              <span className="metric-value" style={{ color: user?.isActive ? '#28a745' : '#dc3545' }}>
+                {user?.isActive ? 'Active' : 'Inactive'}
+              </span>
+            </div>
+          </div>
           
           <div className="card">
             <h2>Quick Stats</h2>

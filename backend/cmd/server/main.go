@@ -1,129 +1,220 @@
 package main
 
 import (
-	"context"
+	"fmt"
+	"log"
 	"net/http"
 	"os"
-	"os/signal"
-	"syscall"
 	"time"
 
-	"github.com/99designs/gqlgen/graphql/handler"
-	"github.com/99designs/gqlgen/graphql/playground"
+	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
-	"github.com/sirupsen/logrus"
+	"github.com/joho/godotenv"
+	"gorm.io/driver/postgres"
+	"gorm.io/gorm"
 
-	"github.com/GOPAL-YADAV-D/Soter/graph"
-	"github.com/GOPAL-YADAV-D/Soter/graph/generated"
-	"github.com/GOPAL-YADAV-D/Soter/internal/config"
-	"github.com/GOPAL-YADAV-D/Soter/internal/database"
-	"github.com/GOPAL-YADAV-D/Soter/internal/handlers"
-	"github.com/GOPAL-YADAV-D/Soter/internal/middleware"
+	"github.com/GOPAL-YADAV-D/Soter/internal/auth"
+	"github.com/GOPAL-YADAV-D/Soter/internal/models"
+	"github.com/GOPAL-YADAV-D/Soter/internal/repository"
 )
 
-func main() {
-	// Load configuration
-	cfg := config.LoadConfig()
-
-	// Configure logging
-	setupLogging(cfg.LogLevel)
-
-	// Initialize database
-	db, err := database.NewConnection(cfg)
-	if err != nil {
-		logrus.WithError(err).Fatal("Failed to connect to database")
-	}
-	defer db.Close()
-
-	// Setup Gin router
-	router := setupRouter(cfg, db)
-
-	// Create HTTP server
-	srv := &http.Server{
-		Addr:    cfg.Host + ":" + cfg.Port,
-		Handler: router,
-	}
-
-	// Start server in a goroutine
-	go func() {
-		logrus.WithField("address", srv.Addr).Info("Starting HTTP server")
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			logrus.WithError(err).Fatal("Failed to start server")
-		}
-	}()
-
-	// Wait for interrupt signal to gracefully shutdown the server
-	quit := make(chan os.Signal, 1)
-	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-	<-quit
-	logrus.Info("Shutting down server...")
-
-	// Graceful shutdown with timeout
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	if err := srv.Shutdown(ctx); err != nil {
-		logrus.WithError(err).Fatal("Server forced to shutdown")
-	}
-
-	logrus.Info("Server exited")
+type Server struct {
+	db          *gorm.DB
+	authService *auth.AuthService
+	userRepo    *repository.UserRepository
 }
 
-func setupLogging(level string) {
-	logrus.SetFormatter(&logrus.JSONFormatter{
-		TimestampFormat: time.RFC3339,
+type LoginRequest struct {
+	Email    string `json:"email" binding:"required,email"`
+	Password string `json:"password" binding:"required"`
+}
+
+type RegisterRequest struct {
+	Name                    string `json:"name" binding:"required"`
+	Username                string `json:"username" binding:"required"`
+	Email                   string `json:"email" binding:"required,email"`
+	Password                string `json:"password" binding:"required,min=6"`
+	OrganizationName        string `json:"organizationName" binding:"required"`
+	OrganizationDescription string `json:"organizationDescription"`
+}
+
+type AuthResponse struct {
+	User      *models.User    `json:"user"`
+	TokenPair *auth.TokenPair `json:"tokenPair"`
+	Message   string          `json:"message"`
+}
+
+func (s *Server) login(c *gin.Context) {
+	var req LoginRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	user, err := s.userRepo.GetByEmail(req.Email)
+	if err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid credentials"})
+		return
+	}
+
+	if !s.authService.CheckPassword(req.Password, user.PasswordHash) {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid credentials"})
+		return
+	}
+
+	tokenPair, err := s.authService.GenerateTokenPair(user.ID.String(), user.Username, user.Email)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to generate tokens"})
+		return
+	}
+
+	c.JSON(http.StatusOK, AuthResponse{
+		User:      user,
+		TokenPair: tokenPair,
+		Message:   "Login successful",
 	})
-
-	logLevel, err := logrus.ParseLevel(level)
-	if err != nil {
-		logrus.WithError(err).Warn("Invalid log level, defaulting to info")
-		logLevel = logrus.InfoLevel
-	}
-	logrus.SetLevel(logLevel)
 }
 
-func setupRouter(cfg *config.Config, db *database.DB) *gin.Engine {
-	// Set Gin mode
-	if cfg.LogLevel == "debug" {
-		gin.SetMode(gin.DebugMode)
-	} else {
+func (s *Server) register(c *gin.Context) {
+	var req RegisterRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	// Check if user already exists
+	existingUser, _ := s.userRepo.GetByEmail(req.Email)
+	if existingUser != nil {
+		c.JSON(http.StatusConflict, gin.H{"error": "User already exists"})
+		return
+	}
+
+	existingUser, _ = s.userRepo.GetByUsername(req.Username)
+	if existingUser != nil {
+		c.JSON(http.StatusConflict, gin.H{"error": "Username already taken"})
+		return
+	}
+
+	// Hash password
+	hashedPassword, err := s.authService.HashPassword(req.Password)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to hash password"})
+		return
+	}
+
+	// Create organization first
+	org, err := s.userRepo.CreateOrganizationWithUser(
+		req.OrganizationName,
+		req.OrganizationDescription,
+		req.Name,
+		req.Username,
+		req.Email,
+		hashedPassword,
+	)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create user and organization"})
+		return
+	}
+
+	// Get the created user
+	user, err := s.userRepo.GetByEmail(req.Email)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve created user"})
+		return
+	}
+
+	// Generate tokens
+	tokenPair, err := s.authService.GenerateTokenPair(user.ID.String(), user.Username, user.Email)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to generate tokens"})
+		return
+	}
+
+	log.Printf("User registered successfully: %s (Organization: %s)", user.Email, org.Name)
+
+	c.JSON(http.StatusCreated, AuthResponse{
+		User:      user,
+		TokenPair: tokenPair,
+		Message:   "Registration successful",
+	})
+}
+
+func (s *Server) health(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{
+		"status":    "healthy",
+		"service":   "Secure File Vault API",
+		"timestamp": time.Now().Format(time.RFC3339),
+	})
+}
+
+func main() {
+	// Load environment variables
+	if err := godotenv.Load("../.env"); err != nil {
+		log.Printf("Warning: .env file not found: %v", err)
+	}
+
+	// Database connection
+	dsn := fmt.Sprintf("host=%s user=%s password=%s dbname=%s port=%s sslmode=%s",
+		os.Getenv("DB_HOST"),
+		os.Getenv("DB_USER"),
+		os.Getenv("DB_PASSWORD"),
+		os.Getenv("DB_NAME"),
+		os.Getenv("DB_PORT"),
+		os.Getenv("DB_SSLMODE"),
+	)
+
+	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
+	if err != nil {
+		log.Fatal("Failed to connect to database:", err)
+	}
+
+	// Auto migrate models
+	db.AutoMigrate(&models.User{}, &models.Organization{})
+
+	// Initialize services
+	authService := auth.NewAuthService(
+		os.Getenv("JWT_SECRET"),
+	)
+	userRepo := repository.NewUserRepository(db)
+
+	server := &Server{
+		db:          db,
+		authService: authService,
+		userRepo:    userRepo,
+	}
+
+	// Setup Gin
+	if os.Getenv("GIN_MODE") == "release" {
 		gin.SetMode(gin.ReleaseMode)
 	}
 
-	router := gin.New()
+	r := gin.Default()
 
-	// Add middleware
-	router.Use(middleware.RequestIDMiddleware())
-	router.Use(middleware.StructuredLogger())
-	router.Use(middleware.PrometheusMiddleware())
-	router.Use(middleware.CORSMiddleware())
-	router.Use(gin.Recovery())
+	// Configure CORS
+	r.Use(cors.New(cors.Config{
+		AllowOrigins:     []string{"http://localhost:3000"},
+		AllowMethods:     []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
+		AllowHeaders:     []string{"Origin", "Content-Type", "Accept", "Authorization"},
+		ExposeHeaders:    []string{"Content-Length"},
+		AllowCredentials: true,
+		MaxAge:           12 * time.Hour,
+	}))
 
-	// Health check endpoint
-	healthHandler := handlers.NewHealthHandler(db)
-	router.GET("/healthz", healthHandler.HealthCheck)
-
-	// Metrics endpoint
-	router.GET("/metrics", gin.WrapH(promhttp.Handler()))
-
-	// GraphQL endpoints
-	resolver := &graph.Resolver{
-		DB: db,
-	}
-	
-	gqlHandler := handler.NewDefaultServer(generated.NewExecutableSchema(generated.Config{Resolvers: resolver}))
-	
-	router.POST("/query", gin.WrapH(gqlHandler))
-	router.GET("/playground", gin.WrapH(playground.Handler("GraphQL playground", "/query")))
-
-	// API routes (future)
-	api := router.Group("/api/v1")
+	// Routes
+	api := r.Group("/api/v1")
 	{
-		api.GET("/ping", func(c *gin.Context) {
-			c.JSON(http.StatusOK, gin.H{"message": "pong"})
-		})
+		api.POST("/auth/login", server.login)
+		api.POST("/auth/register", server.register)
 	}
 
-	return router
+	r.GET("/healthz", server.health)
+	r.GET("/health", server.health)
+
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+	}
+
+	log.Printf("Server starting on port %s", port)
+	log.Fatal(r.Run(":" + port))
 }

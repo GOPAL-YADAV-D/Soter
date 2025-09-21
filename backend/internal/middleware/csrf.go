@@ -36,7 +36,7 @@ func (csrf *CSRFProtection) CSRFMiddleware() gin.HandlerFunc {
 		// Skip CSRF protection for GET, HEAD, OPTIONS (safe methods)
 		if c.Request.Method == "GET" || c.Request.Method == "HEAD" || c.Request.Method == "OPTIONS" {
 			// Set CSRF token for safe methods
-			csrf.setCSRFToken(c)
+			_ = csrf.setCSRFToken(c)
 			c.Next()
 			return
 		}
@@ -66,13 +66,13 @@ func (csrf *CSRFProtection) CSRFMiddleware() gin.HandlerFunc {
 }
 
 // setCSRFToken generates and sets a new CSRF token
-func (csrf *CSRFProtection) setCSRFToken(c *gin.Context) {
+func (csrf *CSRFProtection) setCSRFToken(c *gin.Context) string {
 	// Generate random token
 	tokenBytes := make([]byte, csrf.tokenLength)
 	_, err := rand.Read(tokenBytes)
 	if err != nil {
 		logrus.Errorf("Failed to generate CSRF token: %v", err)
-		return
+		return ""
 	}
 
 	token := base64.URLEncoding.EncodeToString(tokenBytes)
@@ -90,6 +90,7 @@ func (csrf *CSRFProtection) setCSRFToken(c *gin.Context) {
 
 	// Also make token available to JavaScript via header (for SPA applications)
 	c.Header("X-CSRF-Token", token)
+	return token
 }
 
 // validateCSRFToken validates the CSRF token from cookie and header
@@ -130,10 +131,7 @@ func (csrf *CSRFProtection) SecureHeaders() gin.HandlerFunc {
 // GetCSRFToken returns a handler that provides CSRF tokens
 func (csrf *CSRFProtection) GetCSRFTokenHandler() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		csrf.setCSRFToken(c)
-
-		// Get the token from the header that was just set
-		token := c.GetHeader("X-CSRF-Token")
+		token := csrf.setCSRFToken(c)
 
 		c.JSON(http.StatusOK, gin.H{
 			"csrf_token": token,

@@ -12,9 +12,11 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
-# API Base URL
-API_BASE="http://localhost:8080"
-API_URL="${API_BASE}/api/v1"
+# Configuration
+API_URL="http://localhost:8080"
+API_BASE="http://localhost:8080/api/v1"
+HEALTH_URL="http://localhost:8080"
+COOKIE_JAR="/tmp/test_cookies.txt"
 
 # Function to print colored output
 print_test() {
@@ -60,44 +62,51 @@ api_request() {
     local data=$3
     local extra_headers=$4
     
-    local headers="Content-Type: application/json"
+    local curl_cmd="curl -s -X $method"
+    curl_cmd="$curl_cmd -b $COOKIE_JAR -c $COOKIE_JAR"
+    curl_cmd="$curl_cmd -H 'Content-Type: application/json'"
+    
     if [ -n "$CSRF_TOKEN" ]; then
-        headers="$headers -H X-CSRF-Token: $CSRF_TOKEN"
+        curl_cmd="$curl_cmd -H 'X-CSRF-Token: $CSRF_TOKEN'"
     fi
     if [ -n "$JWT_TOKEN" ]; then
-        headers="$headers -H Authorization: Bearer $JWT_TOKEN"
+        curl_cmd="$curl_cmd -H 'Authorization: Bearer $JWT_TOKEN'"
     fi
     if [ -n "$extra_headers" ]; then
-        headers="$headers $extra_headers"
+        curl_cmd="$curl_cmd $extra_headers"
     fi
     
     if [ -n "$data" ]; then
-        curl -s -X "$method" -H "$headers" -d "$data" "${API_URL}${endpoint}"
-    else
-        curl -s -X "$method" -H "$headers" "${API_URL}${endpoint}"
+        curl_cmd="$curl_cmd -d '$data'"
     fi
+    
+    curl_cmd="$curl_cmd '${API_URL}${endpoint}'"
+    eval "$curl_cmd"
 }
 
 # Variables for testing
 CSRF_TOKEN=""
 JWT_TOKEN=""
-USER_EMAIL="test@example.com"
+USER_EMAIL="testuser3@example.com"
 USER_PASSWORD="testpassword123"
 TEST_FILE="test-upload.txt"
 
 echo "🧪 Starting Secure File Vault Feature Tests"
 echo "=========================================="
 
+# Clean up any existing cookies
+rm -f $COOKIE_JAR
+
 # 1. Health Check Tests
 print_test "Health Check Tests"
-check_service "Backend Health" "${API_BASE}/health" || exit 1
-check_service "Backend Healthz" "${API_BASE}/healthz" || exit 1
+check_service "Backend Health" "${HEALTH_URL}/health" || exit 1
+check_service "Backend Healthz" "${HEALTH_URL}/healthz" || exit 1
 print_success "All health checks passed ✓"
 echo ""
 
 # 2. CSRF Token Test
 print_test "CSRF Protection Tests"
-CSRF_RESPONSE=$(curl -s "${API_BASE}/csrf-token")
+CSRF_RESPONSE=$(curl -s -c $COOKIE_JAR "${HEALTH_URL}/csrf-token")
 CSRF_TOKEN=$(echo "$CSRF_RESPONSE" | grep -o '"csrf_token":"[^"]*"' | cut -d'"' -f4)
 
 if [ -n "$CSRF_TOKEN" ]; then
@@ -111,13 +120,14 @@ echo ""
 # 3. User Registration Test
 print_test "User Registration Tests"
 REGISTER_DATA="{
+    \"name\": \"Test User3\",
+    \"username\": \"testuser3\",
     \"email\": \"$USER_EMAIL\",
     \"password\": \"$USER_PASSWORD\",
-    \"firstName\": \"Test\",
-    \"lastName\": \"User\"
+    \"organizationName\": \"Test Organization\"
 }"
 
-REGISTER_RESPONSE=$(api_request "POST" "/auth/register" "$REGISTER_DATA")
+REGISTER_RESPONSE=$(api_request "POST" "/api/v1/auth/register" "$REGISTER_DATA")
 if echo "$REGISTER_RESPONSE" | grep -q "token\|success"; then
     print_success "User registration successful"
 else
@@ -133,8 +143,8 @@ LOGIN_DATA="{
     \"password\": \"$USER_PASSWORD\"
 }"
 
-LOGIN_RESPONSE=$(api_request "POST" "/auth/login" "$LOGIN_DATA")
-JWT_TOKEN=$(echo "$LOGIN_RESPONSE" | grep -o '"token":"[^"]*"' | cut -d'"' -f4)
+LOGIN_RESPONSE=$(api_request "POST" "/api/v1/auth/login" "$LOGIN_DATA")
+JWT_TOKEN=$(echo "$LOGIN_RESPONSE" | grep -o '"access_token":"[^"]*"' | cut -d'"' -f4)
 
 if [ -n "$JWT_TOKEN" ]; then
     print_success "User login successful, JWT token obtained"
@@ -147,7 +157,7 @@ echo ""
 
 # 5. Profile Access Test
 print_test "Authenticated Endpoint Tests"
-PROFILE_RESPONSE=$(api_request "GET" "/profile")
+PROFILE_RESPONSE=$(api_request "GET" "/api/v1/profile")
 if echo "$PROFILE_RESPONSE" | grep -q "email\|user"; then
     print_success "Authenticated profile access successful"
 else
@@ -163,7 +173,7 @@ print_info "Testing rate limits (configured for 2 RPS with burst of 5)..."
 # Make rapid requests to test rate limiting
 RATE_LIMIT_TRIGGERED=false
 for i in {1..10}; do
-    RESPONSE=$(api_request "GET" "/profile" 2>/dev/null)
+    RESPONSE=$(api_request "GET" "/api/v1/profile" 2>/dev/null)
     if echo "$RESPONSE" | grep -q "rate limit\|too many requests"; then
         RATE_LIMIT_TRIGGERED=true
         print_success "Rate limiting triggered on request $i"
@@ -184,15 +194,30 @@ print_test "File Upload Tests"
 # Create a test file
 echo "This is a test file for upload testing with some content." > "$TEST_FILE"
 
+# Refresh CSRF token for file upload
+CSRF_RESPONSE=$(curl -s -c $COOKIE_JAR -b $COOKIE_JAR "${HEALTH_URL}/csrf-token")
+CSRF_TOKEN=$(echo "$CSRF_RESPONSE" | grep -o '"csrf_token":"[^"]*"' | cut -d'"' -f4)
+
 # Create upload session
-UPLOAD_SESSION_RESPONSE=$(api_request "POST" "/files/upload-session" '{"fileName":"test-upload.txt","fileSize":50}')
+UPLOAD_SESSION_RESPONSE=$(api_request "POST" "/api/v1/files/upload-session" '{
+    "files": [
+        {
+            "filename": "test-upload.txt",
+            "mimeType": "text/plain",
+            "fileSize": 50,
+            "folderPath": "/",
+            "contentHash": ""
+        }
+    ],
+    "totalBytes": 50
+}')
 SESSION_TOKEN=$(echo "$UPLOAD_SESSION_RESPONSE" | grep -o '"sessionToken":"[^"]*"' | cut -d'"' -f4)
 
 if [ -n "$SESSION_TOKEN" ]; then
     print_success "Upload session created: ${SESSION_TOKEN:0:20}..."
     
     # Test file upload (this would normally be multipart, simplified for testing)
-    print_info "File upload endpoint available at /files/upload/$SESSION_TOKEN"
+    print_info "File upload endpoint available at /api/v1/files/upload/$SESSION_TOKEN"
     print_success "File upload flow structure verified ✓"
 else
     print_fail "Failed to create upload session"
@@ -202,7 +227,7 @@ echo ""
 
 # 8. Organization Info Test
 print_test "Organization Management Tests"
-ORG_RESPONSE=$(api_request "GET" "/organization/info")
+ORG_RESPONSE=$(api_request "GET" "/api/v1/organization/info")
 if echo "$ORG_RESPONSE" | grep -q "organization\|storage\|name"; then
     print_success "Organization info retrieval successful"
 else
@@ -210,7 +235,7 @@ else
 fi
 
 # Test storage usage
-STORAGE_RESPONSE=$(api_request "GET" "/organization/storage")
+STORAGE_RESPONSE=$(api_request "GET" "/api/v1/organization/storage")
 if echo "$STORAGE_RESPONSE" | grep -q "usage\|total\|used"; then
     print_success "Storage usage retrieval successful"
 else
@@ -244,7 +269,7 @@ echo ""
 # 11. CSRF Protection Test
 print_test "CSRF Protection Validation"
 # Try to make a request without CSRF token
-NO_CSRF_RESPONSE=$(curl -s -X POST -H "Content-Type: application/json" -H "Authorization: Bearer $JWT_TOKEN" -d '{}' "${API_URL}/files/upload-session")
+NO_CSRF_RESPONSE=$(curl -s -X POST -H "Content-Type: application/json" -H "Authorization: Bearer $JWT_TOKEN" -d '{}' "${API_URL}/api/v1/files/upload-session")
 if echo "$NO_CSRF_RESPONSE" | grep -q "CSRF\|forbidden\|invalid"; then
     print_success "CSRF protection is working (blocked request without token)"
 else

@@ -233,9 +233,12 @@ func main() {
 
 	// Initialize configuration
 	cfg := &config.Config{
-		RateLimitRPS:   parseIntEnv("RATE_LIMIT_RPS", 2),
-		RateLimitBurst: parseIntEnv("RATE_LIMIT_BURST", 5),
-		CSRFSecret:     getEnvOrDefault("CSRF_SECRET", "csrf-secret-change-in-production"),
+		RateLimitRPS:        parseIntEnv("RATE_LIMIT_RPS", 2),
+		RateLimitBurst:      parseIntEnv("RATE_LIMIT_BURST", 5),
+		CSRFSecret:          getEnvOrDefault("CSRF_SECRET", "csrf-secret-change-in-production"),
+		StorageEnvironment:  getEnvOrDefault("STORAGE_ENVIRONMENT", "local"),
+		LocalStoragePath:    getEnvOrDefault("LOCAL_STORAGE_PATH", "./storage"),
+		EnableVirusScanning: getEnvOrDefault("ENABLE_VIRUS_SCANNING", "false") == "true",
 	}
 
 	// Initialize middleware services

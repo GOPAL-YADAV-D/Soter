@@ -8,18 +8,30 @@ import (
 	"fmt"
 	"io"
 	"mime"
+	"net"
 	"path/filepath"
 	"strings"
+	"time"
 
+	"github.com/GOPAL-YADAV-D/Soter/internal/config"
 	"github.com/GOPAL-YADAV-D/Soter/internal/models"
+	"github.com/sirupsen/logrus"
 )
 
 // FileValidationService handles file validation and security checks
-type FileValidationService struct{}
+type FileValidationService struct {
+	virusScanningEnabled bool
+	clamAVHost           string
+	clamAVPort           string
+}
 
 // NewFileValidationService creates a new file validation service
-func NewFileValidationService() *FileValidationService {
-	return &FileValidationService{}
+func NewFileValidationService(cfg *config.Config) *FileValidationService {
+	return &FileValidationService{
+		virusScanningEnabled: cfg.EnableVirusScanning,
+		clamAVHost:           "localhost", // Could be configurable
+		clamAVPort:           "3310",      // Default ClamAV port
+	}
 }
 
 // ValidateFile performs comprehensive file validation
@@ -392,4 +404,124 @@ func (s *FileValidationService) validateFileSignature(content []byte, detectedMi
 			result.Warnings = append(result.Warnings, "PDF file signature validation failed")
 		}
 	}
+}
+
+// Enhanced Security Validation Methods
+
+// ValidateFileWithVirusScan performs comprehensive validation including virus scanning
+func (s *FileValidationService) ValidateFileWithVirusScan(ctx context.Context, filename, declaredMimeType string, content io.Reader) (*models.FileValidationResult, error) {
+	// First perform standard validation
+	result, err := s.ValidateFile(ctx, filename, declaredMimeType, content)
+	if err != nil {
+		return result, err
+	}
+
+	// If virus scanning is enabled and file passed initial validation
+	if s.virusScanningEnabled && result.IsValid {
+		// Reset reader position
+		if seeker, ok := content.(io.Seeker); ok {
+			seeker.Seek(0, io.SeekStart)
+		}
+
+		virusScanResult, err := s.scanForViruses(ctx, content)
+		if err != nil {
+			logrus.Warnf("Virus scan failed for file %s: %v", filename, err)
+			result.Warnings = append(result.Warnings, "Virus scan could not be completed")
+		} else {
+			result.VirusScanResult = virusScanResult
+			if !virusScanResult.Clean {
+				result.IsValid = false
+				result.Errors = append(result.Errors, fmt.Sprintf("Virus detected: %s", virusScanResult.ThreatName))
+			}
+		}
+	}
+
+	return result, nil
+}
+
+// scanForViruses performs virus scanning using ClamAV
+func (s *FileValidationService) scanForViruses(ctx context.Context, content io.Reader) (*models.VirusScanResult, error) {
+	scanResult := &models.VirusScanResult{
+		Clean:     true,
+		Engine:    "ClamAV",
+		ScannedAt: time.Now(),
+	}
+
+	if !s.virusScanningEnabled {
+		scanResult.Status = "disabled"
+		return scanResult, nil
+	}
+
+	// Try to connect to ClamAV daemon
+	conn, err := net.DialTimeout("tcp", fmt.Sprintf("%s:%s", s.clamAVHost, s.clamAVPort), 10*time.Second)
+	if err != nil {
+		scanResult.Status = "error"
+		scanResult.Error = fmt.Sprintf("Failed to connect to ClamAV: %v", err)
+		return scanResult, fmt.Errorf("ClamAV connection failed: %w", err)
+	}
+	defer conn.Close()
+
+	// Send INSTREAM command
+	_, err = conn.Write([]byte("nINSTREAM\n"))
+	if err != nil {
+		scanResult.Status = "error"
+		scanResult.Error = "Failed to send scan command"
+		return scanResult, err
+	}
+
+	// Stream file content to ClamAV
+	buffer := make([]byte, 8192)
+	for {
+		n, err := content.Read(buffer)
+		if n > 0 {
+			// Send chunk size and data
+			chunkSize := fmt.Sprintf("%08x", n)
+			conn.Write([]byte(chunkSize))
+			conn.Write(buffer[:n])
+		}
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			scanResult.Status = "error"
+			scanResult.Error = "Failed to stream file content"
+			return scanResult, err
+		}
+	}
+
+	// Send end-of-stream marker
+	conn.Write([]byte("00000000"))
+
+	// Read response
+	response := make([]byte, 1024)
+	n, err := conn.Read(response)
+	if err != nil {
+		scanResult.Status = "error"
+		scanResult.Error = "Failed to read scan result"
+		return scanResult, err
+	}
+
+	responseStr := string(response[:n])
+	logrus.Debugf("ClamAV response: %s", responseStr)
+
+	// Parse ClamAV response
+	if strings.Contains(responseStr, "FOUND") {
+		scanResult.Clean = false
+		scanResult.Status = "infected"
+		// Extract threat name
+		parts := strings.Split(responseStr, ": ")
+		if len(parts) >= 2 {
+			threatParts := strings.Split(parts[1], " ")
+			if len(threatParts) > 0 {
+				scanResult.ThreatName = threatParts[0]
+			}
+		}
+	} else if strings.Contains(responseStr, "OK") {
+		scanResult.Status = "clean"
+	} else {
+		scanResult.Status = "error"
+		scanResult.Error = fmt.Sprintf("Unexpected ClamAV response: %s", responseStr)
+	}
+
+	return scanResult, nil
 }

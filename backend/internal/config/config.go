@@ -21,6 +21,10 @@ type Config struct {
 	DBName     string
 	DBSSLMode  string
 
+	// Storage
+	StorageEnvironment string // "local" or "production"
+	LocalStoragePath   string
+
 	// Azure Blob Storage
 	AzureStorageAccount   string
 	AzureStorageKey       string
@@ -34,6 +38,10 @@ type Config struct {
 	RateLimitRPS   int
 	RateLimitBurst int
 	StorageQuotaMB int
+
+	// Security
+	EnableVirusScanning bool
+	CSRFSecret          string
 
 	// Logging
 	LogLevel string
@@ -58,6 +66,10 @@ func LoadConfig() *Config {
 		DBName:     getEnv("DB_NAME", "soter"),
 		DBSSLMode:  getEnv("DB_SSLMODE", "disable"),
 
+		// Storage configuration
+		StorageEnvironment: getEnv("STORAGE_ENVIRONMENT", "local"),
+		LocalStoragePath:   getEnv("LOCAL_STORAGE_PATH", "./storage/files"),
+
 		// Azure Storage configuration (switches based on STORAGE_ENVIRONMENT)
 		AzureStorageAccount:   getAzureStorageAccount(),
 		AzureStorageKey:       getAzureStorageKey(),
@@ -65,12 +77,16 @@ func LoadConfig() *Config {
 		AzureStorageEndpoint:  getAzureStorageEndpoint(),
 
 		// Security defaults
-		JWTSecret: getEnv("JWT_SECRET", "your-secret-key-change-this-in-production"),
+		JWTSecret:  getEnv("JWT_SECRET", "your-secret-key-change-this-in-production"),
+		CSRFSecret: getEnv("CSRF_SECRET", "your-csrf-secret-change-this-in-production"),
 
 		// Rate limiting defaults
 		RateLimitRPS:   getEnvAsInt("RATE_LIMIT_RPS", 2),
 		RateLimitBurst: getEnvAsInt("RATE_LIMIT_BURST", 5),
 		StorageQuotaMB: getEnvAsInt("STORAGE_QUOTA_MB", 10),
+
+		// Security features
+		EnableVirusScanning: getEnvAsBool("ENABLE_VIRUS_SCANNING", false),
 
 		// Logging
 		LogLevel: getEnv("LOG_LEVEL", "info"),
@@ -90,6 +106,15 @@ func getEnvAsInt(key string, defaultValue int) int {
 	if value := os.Getenv(key); value != "" {
 		if intValue, err := strconv.Atoi(value); err == nil {
 			return intValue
+		}
+	}
+	return defaultValue
+}
+
+func getEnvAsBool(key string, defaultValue bool) bool {
+	if value := os.Getenv(key); value != "" {
+		if boolValue, err := strconv.ParseBool(value); err == nil {
+			return boolValue
 		}
 	}
 	return defaultValue

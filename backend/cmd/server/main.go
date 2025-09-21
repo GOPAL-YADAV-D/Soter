@@ -5,6 +5,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"time"
 
 	"github.com/gin-contrib/cors"
@@ -15,7 +16,9 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/GOPAL-YADAV-D/Soter/internal/auth"
+	"github.com/GOPAL-YADAV-D/Soter/internal/config"
 	"github.com/GOPAL-YADAV-D/Soter/internal/handlers"
+	"github.com/GOPAL-YADAV-D/Soter/internal/middleware"
 	"github.com/GOPAL-YADAV-D/Soter/internal/models"
 	"github.com/GOPAL-YADAV-D/Soter/internal/repository"
 	"github.com/GOPAL-YADAV-D/Soter/internal/services"
@@ -26,6 +29,9 @@ func setupRoutes(
 	orgHandler *handlers.OrganizationHandler,
 	fileHandler *handlers.FileHandler,
 	authService *auth.AuthService,
+	rateLimiter *middleware.RateLimiter,
+	csrfProtection *middleware.CSRFProtection,
+	auditService *services.AuditService,
 ) *gin.Engine {
 	if os.Getenv("GIN_MODE") == "release" {
 		gin.SetMode(gin.ReleaseMode)
@@ -33,17 +39,21 @@ func setupRoutes(
 
 	r := gin.Default()
 
-	// Configure CORS for React frontend
+	// Add security middleware
+	r.Use(csrfProtection.SecureHeaders())
+	r.Use(auditService.AuditMiddleware())
+
+	// Configure CORS for React frontend with enhanced security
 	r.Use(cors.New(cors.Config{
 		AllowOrigins:     []string{"http://localhost:3000", "http://localhost:5173"},
 		AllowMethods:     []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
-		AllowHeaders:     []string{"Origin", "Content-Type", "Accept", "Authorization"},
-		ExposeHeaders:    []string{"Content-Length"},
+		AllowHeaders:     []string{"Origin", "Content-Type", "Accept", "Authorization", "X-CSRF-Token"},
+		ExposeHeaders:    []string{"Content-Length", "X-CSRF-Token"},
 		AllowCredentials: true,
 		MaxAge:           12 * time.Hour,
 	}))
 
-	// Health check routes
+	// Health check routes (no rate limiting)
 	r.GET("/healthz", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
 			"status":    "healthy",
@@ -59,11 +69,16 @@ func setupRoutes(
 		})
 	})
 
-	// API routes
-	api := r.Group("/api/v1")
+	// CSRF token endpoint
+	r.GET("/csrf-token", csrfProtection.GetCSRFTokenHandler())
 
-	// Authentication routes (public)
+	// API routes with rate limiting
+	api := r.Group("/api/v1")
+	api.Use(rateLimiter.RateLimitMiddleware())
+
+	// Authentication routes (public, with CSRF protection)
 	auth := api.Group("/auth")
+	auth.Use(csrfProtection.CSRFProtection())
 	{
 		auth.POST("/register", authHandler.Register)
 		auth.POST("/login", authHandler.Login)
@@ -71,9 +86,10 @@ func setupRoutes(
 		auth.POST("/logout", authHandler.Logout)
 	}
 
-	// Protected routes (require authentication)
+	// Protected routes (require authentication + CSRF protection)
 	protected := api.Group("/")
-	protected.Use(authMiddleware(authService)) // Pass authService to middleware
+	protected.Use(authMiddleware(authService))
+	protected.Use(csrfProtection.CSRFProtection())
 
 	// User profile routes
 	protected.GET("/profile", authHandler.GetUserProfile)
@@ -94,14 +110,32 @@ func setupRoutes(
 		files.POST("/upload/:sessionToken", fileHandler.UploadFile)
 		files.POST("/upload-session/:sessionToken/complete", fileHandler.CompleteUploadSession)
 		files.GET("/upload-session/:sessionToken/progress", fileHandler.GetUploadProgress)
-		files.GET("", fileHandler.GetFiles)  // Remove trailing slash to avoid redirect
-		files.GET("/", fileHandler.GetFiles) // Also handle with trailing slash
+		files.GET("", fileHandler.GetFiles)
+		files.GET("/", fileHandler.GetFiles)
 		files.GET("/:fileId", fileHandler.GetFileMetadata)
 		files.GET("/:fileId/download", fileHandler.DownloadFile)
 		files.DELETE("/:fileId", fileHandler.DeleteFile)
 	}
 
 	return r
+}
+
+// parseIntEnv parses an environment variable as int with default value
+func parseIntEnv(key string, defaultValue int) int {
+	if value := os.Getenv(key); value != "" {
+		if parsed, err := strconv.Atoi(value); err == nil {
+			return parsed
+		}
+	}
+	return defaultValue
+}
+
+// getEnvOrDefault returns environment variable value or default
+func getEnvOrDefault(key, defaultValue string) string {
+	if value := os.Getenv(key); value != "" {
+		return value
+	}
+	return defaultValue
 }
 
 // authMiddleware validates JWT tokens and sets user context
@@ -197,16 +231,25 @@ func main() {
 	// Initialize services
 	authService := auth.NewAuthService(os.Getenv("JWT_SECRET"))
 
-	storagePath := os.Getenv("STORAGE_PATH")
-	if storagePath == "" {
-		storagePath = "./storage" // Default storage path
+	// Initialize configuration
+	cfg := &config.Config{
+		RateLimitRPS:   parseIntEnv("RATE_LIMIT_RPS", 2),
+		RateLimitBurst: parseIntEnv("RATE_LIMIT_BURST", 5),
+		CSRFSecret:     getEnvOrDefault("CSRF_SECRET", "csrf-secret-change-in-production"),
 	}
-	storageService, err := services.NewStorageService(storagePath)
+
+	// Initialize middleware services
+	rateLimiter := middleware.NewRateLimiter(cfg)
+	csrfProtection := middleware.NewCSRFProtection(cfg)
+	auditService := services.NewAuditService(db)
+	// quotaService := services.NewQuotaService(userRepo, fileRepo) // TODO: Integrate with file upload service
+
+	storageService, err := services.NewStorageService(cfg)
 	if err != nil {
 		log.Fatal("Failed to initialize storage service:", err)
 	}
 
-	validationService := services.NewFileValidationService()
+	validationService := services.NewFileValidationService(cfg)
 	uploadService := services.NewFileUploadService(
 		fileRepo,
 		storageService,
@@ -224,10 +267,11 @@ func main() {
 		groupRepo,
 		uploadService,
 		validationService,
+		storageService,
 	)
 
 	// Setup routes
-	r := setupRoutes(authHandler, orgHandler, fileHandler, authService)
+	r := setupRoutes(authHandler, orgHandler, fileHandler, authService, rateLimiter, csrfProtection, auditService)
 
 	port := os.Getenv("PORT")
 	if port == "" {

@@ -3,8 +3,10 @@ package handlers
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/GOPAL-YADAV-D/Soter/internal/models"
 	"github.com/GOPAL-YADAV-D/Soter/internal/repository"
@@ -20,6 +22,7 @@ type FileHandler struct {
 	groupRepo         *repository.GroupRepository
 	fileUploadService *services.FileUploadService
 	validationService *services.FileValidationService
+	storageService    *services.StorageService
 }
 
 func NewFileHandler(
@@ -29,6 +32,7 @@ func NewFileHandler(
 	groupRepo *repository.GroupRepository,
 	uploadService *services.FileUploadService,
 	validationService *services.FileValidationService,
+	storageService *services.StorageService,
 ) *FileHandler {
 	return &FileHandler{
 		fileRepo:          fileRepo,
@@ -37,6 +41,7 @@ func NewFileHandler(
 		groupRepo:         groupRepo,
 		fileUploadService: uploadService,
 		validationService: validationService,
+		storageService:    storageService,
 	}
 }
 
@@ -371,15 +376,25 @@ func (h *FileHandler) DownloadFile(c *gin.Context) {
 	// Update download count
 	go h.fileRepo.UpdateDownloadCount(context.Background(), userFile.ID)
 
-	// TODO: Implement actual file streaming from storage
-	// For now, return file information
-	c.JSON(http.StatusOK, gin.H{
-		"message":     "Download would start here",
-		"filename":    userFile.UserFilename,
-		"contentType": file.DetectedMimeType,
-		"fileSize":    file.FileSize,
-		"storagePath": file.StoragePath,
-	})
+	// Download file from storage
+	fileReader, err := h.storageService.DownloadFile(c.Request.Context(), file.StoragePath)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to download file"})
+		return
+	}
+	defer fileReader.Close()
+
+	// Set appropriate headers
+	c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", userFile.UserFilename))
+	c.Header("Content-Type", file.DetectedMimeType)
+	c.Header("Content-Length", fmt.Sprintf("%d", file.FileSize))
+
+	// Stream file to client
+	_, err = io.Copy(c.Writer, fileReader)
+	if err != nil {
+		// Log error but don't send JSON response as headers are already sent
+		fmt.Printf("Error streaming file: %v\n", err)
+	}
 }
 
 // DeleteFile handles file deletion (soft delete)
@@ -443,4 +458,56 @@ func (h *FileHandler) GetUploadProgress(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, progress)
+}
+
+// GenerateDownloadURL creates a secure, time-limited download URL for a file
+func (h *FileHandler) GenerateDownloadURL(c *gin.Context) {
+	userID, exists := c.Get("userID")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "User not authenticated"})
+		return
+	}
+
+	fileIDStr := c.Param("fileId")
+	fileID, err := uuid.Parse(fileIDStr)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid file ID"})
+		return
+	}
+
+	// Get user file
+	userFile, err := h.fileRepo.GetUserFile(c.Request.Context(), userID.(uuid.UUID), fileID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "File not found"})
+		return
+	}
+
+	// Check if user has access to this file
+	if userFile.UserID != userID.(uuid.UUID) {
+		// TODO: Check group permissions for read access
+		c.JSON(http.StatusForbidden, gin.H{"error": "Access denied"})
+		return
+	}
+
+	// Generate download URL (expires in 1 hour by default)
+	expiry := time.Hour
+	if expiryParam := c.Query("expiry_minutes"); expiryParam != "" {
+		if minutes, err := strconv.Atoi(expiryParam); err == nil && minutes > 0 && minutes <= 1440 { // Max 24 hours
+			expiry = time.Duration(minutes) * time.Minute
+		}
+	}
+
+	downloadURL, err := h.storageService.GenerateDownloadURL(c.Request.Context(), userFile.File.StoragePath, expiry)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to generate download URL"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"download_url": downloadURL,
+		"expires_in":   int(expiry.Seconds()),
+		"filename":     userFile.UserFilename,
+		"file_size":    userFile.File.FileSize,
+		"content_type": userFile.File.DetectedMimeType,
+	})
 }

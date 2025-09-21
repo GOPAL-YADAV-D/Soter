@@ -4,7 +4,33 @@
 [![Security Scan](https://github.com/GOPAL-YADAV-D/Soter/actions/workflows/security.yml/badge.svg)](https://github.com/GOPAL-YADAV-D/Soter/actions/workflows/security.yml)
 [![codecov](https://codecov.io/gh/GOPAL-YADAV-D/Soter/branch/main/graph/badge.svg)](https://codecov.io/gh/GOPAL-YADAV-D/Soter)
 
-A production-grade secure file storage and sharing system with deduplication, advanced sharing capabilities, comprehensive search, observability, and robust admin controls.
+A production-grade secure file storage and sharing system with enterprise-level security, rate limiting, audit logging, virus scanning, and Azure Blob Storage integration.
+
+## 🆕 Latest Enhancements
+
+### 🔒 Enterprise Security Features
+- **CSRF Protection**: Double-submit cookie pattern with secure headers
+- **Rate Limiting**: Token bucket algorithm with per-user/organization limits
+- **Audit Logging**: Comprehensive security event tracking
+- **Virus Scanning**: ClamAV integration for malware detection
+- **Azure Storage**: Secure file storage with SAS URL downloads
+
+### 📊 Monitoring & Performance
+- **Redis Caching**: Distributed rate limiting and session storage
+- **Prometheus Metrics**: Real-time performance monitoring
+- **Grafana Dashboards**: Visual analytics and alerting
+- **Health Checks**: Service availability monitoring
+
+## 🧪 Testing
+
+📋 **[Complete Testing Guide](TESTING_GUIDE.md)** - Comprehensive testing procedures for all features
+
+Quick start testing:
+```bash
+./scripts/setup-testing.sh
+docker-compose up -d
+./scripts/test-features.sh
+```
 
 ## 🏗️ Architecture Overview
 

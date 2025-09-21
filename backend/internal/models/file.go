@@ -133,12 +133,23 @@ type UploadProgress struct {
 
 // FileValidationResult represents file validation outcome
 type FileValidationResult struct {
-	IsValid          bool     `json:"is_valid"`
-	DetectedMimeType string   `json:"detected_mime_type"`
-	ContentHash      string   `json:"content_hash"`
-	FileSize         int64    `json:"file_size"`
-	Errors           []string `json:"errors,omitempty"`
-	Warnings         []string `json:"warnings,omitempty"`
+	IsValid          bool             `json:"is_valid"`
+	DetectedMimeType string           `json:"detected_mime_type"`
+	ContentHash      string           `json:"content_hash"`
+	FileSize         int64            `json:"file_size"`
+	Errors           []string         `json:"errors,omitempty"`
+	Warnings         []string         `json:"warnings,omitempty"`
+	VirusScanResult  *VirusScanResult `json:"virus_scan_result,omitempty"`
+}
+
+// VirusScanResult represents the result of virus scanning
+type VirusScanResult struct {
+	Clean      bool      `json:"clean"`
+	Status     string    `json:"status"` // "clean", "infected", "error", "disabled"
+	Engine     string    `json:"engine"`
+	ThreatName string    `json:"threat_name,omitempty"`
+	Error      string    `json:"error,omitempty"`
+	ScannedAt  time.Time `json:"scanned_at"`
 }
 
 // DeduplicationResult represents the result of deduplication check

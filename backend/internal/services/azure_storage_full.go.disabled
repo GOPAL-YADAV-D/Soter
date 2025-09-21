@@ -1,0 +1,242 @@
+package services
+
+import (
+	"context"
+	"fmt"
+	"io"
+	"net/http"
+	"time"
+
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
+	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob"
+	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/blob"
+	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/sas"
+	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/container"
+	"github.com/sirupsen/logrus"
+)
+
+// AzureStorageService implements storage operations using Azure Blob Storage
+type AzureStorageService struct {
+	client        *azblob.Client
+	containerName string
+	accountName   string
+	accountKey    string
+}
+
+// NewAzureStorageService creates a new Azure Blob Storage service
+func NewAzureStorageService(accountName, accountKey, containerName, endpoint string) (*AzureStorageService, error) {
+	// Create credentials
+	credential, err := azblob.NewSharedKeyCredential(accountName, accountKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create Azure credentials: %w", err)
+	}
+
+	// Build service URL
+	serviceURL := fmt.Sprintf("https://%s.blob.core.windows.net/", accountName)
+	if endpoint != "" {
+		// Use custom endpoint (for Azurite local testing)
+		serviceURL = endpoint + "/"
+	}
+
+	// Configure client options for optimal performance
+	options := &azblob.ClientOptions{
+		ClientOptions: azcore.ClientOptions{
+			Transport: &http.Client{
+				Transport: &http.Transport{
+					MaxIdleConns:        100,
+					MaxIdleConnsPerHost: 10,
+					IdleConnTimeout:     90 * time.Second,
+				},
+			},
+		},
+	}
+
+	// Create client
+	client, err := azblob.NewClientWithSharedKeyCredential(serviceURL, credential, options)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create Azure blob client: %w", err)
+	}
+
+	service := &AzureStorageService{
+		client:        client,
+		containerName: containerName,
+		accountName:   accountName,
+		accountKey:    accountKey,
+	}
+
+	// Ensure container exists
+	if err := service.ensureContainer(context.Background()); err != nil {
+		return nil, fmt.Errorf("failed to ensure container exists: %w", err)
+	}
+
+	return service, nil
+}
+
+// ensureContainer creates the container if it doesn't exist
+func (s *AzureStorageService) ensureContainer(ctx context.Context) error {
+	containerClient := s.client.ServiceClient().NewContainerClient(s.containerName)
+	
+	// Try to create container (will fail if it already exists, which is fine)
+	_, err := containerClient.Create(ctx, nil)
+	
+	if err != nil {
+		// Check if error is because container already exists
+		if err, ok := err.(*azcore.ResponseError); ok && err.ErrorCode == "ContainerAlreadyExists" {
+			return nil // Container exists, which is what we want
+		}
+		return fmt.Errorf("failed to create container: %w", err)
+	}
+	
+	logrus.Infof("Created Azure blob container: %s", s.containerName)
+	return nil
+}
+
+// UploadFile uploads a file to Azure Blob Storage
+func (s *AzureStorageService) UploadFile(ctx context.Context, storagePath string, content io.Reader, contentLength int64, contentType string) error {
+	blobClient := s.client.ServiceClient().NewContainerClient(s.containerName).NewBlobClient(storagePath)
+	
+	// Upload with retry logic
+	var err error
+	maxRetries := 3
+	for i := 0; i < maxRetries; i++ {
+		_, err = blobClient.UploadStream(ctx, content, &azblob.UploadStreamOptions{})
+		if err == nil {
+			break
+		}
+		
+		if i < maxRetries-1 {
+			logrus.Warnf("Upload attempt %d failed, retrying: %v", i+1, err)
+			time.Sleep(time.Duration(i+1) * time.Second)
+		}
+	}
+	
+	if err != nil {
+		return fmt.Errorf("failed to upload file after %d attempts: %w", maxRetries, err)
+	}
+	
+	logrus.Debugf("Successfully uploaded file to Azure Blob: %s", storagePath)
+	return nil
+}
+
+// DownloadFile downloads a file from Azure Blob Storage
+func (s *AzureStorageService) DownloadFile(ctx context.Context, storagePath string) (io.ReadCloser, error) {
+	blobClient := s.client.ServiceClient().NewContainerClient(s.containerName).NewBlobClient(storagePath)
+	
+	// Download with retry logic
+	var response azblob.DownloadStreamResponse
+	var err error
+	maxRetries := 3
+	
+	for i := 0; i < maxRetries; i++ {
+		response, err = blobClient.DownloadStream(ctx, &azblob.DownloadStreamOptions{})
+		if err == nil {
+			break
+		}
+		
+		if i < maxRetries-1 {
+			logrus.Warnf("Download attempt %d failed, retrying: %v", i+1, err)
+			time.Sleep(time.Duration(i+1) * time.Second)
+		}
+	}
+	
+	if err != nil {
+		return nil, fmt.Errorf("failed to download file after %d attempts: %w", maxRetries, err)
+	}
+	
+	return response.Body, nil
+}
+
+// DeleteFile deletes a file from Azure Blob Storage
+func (s *AzureStorageService) DeleteFile(ctx context.Context, storagePath string) error {
+	blobClient := s.client.ServiceClient().NewContainerClient(s.containerName).NewBlobClient(storagePath)
+	
+	// Delete with retry logic
+	var err error
+	maxRetries := 3
+	
+	for i := 0; i < maxRetries; i++ {
+		_, err = blobClient.Delete(ctx, &azblob.DeleteBlobOptions{})
+		if err == nil {
+			break
+		}
+		
+		// Check if blob doesn't exist (which is fine for delete)
+		var respErr *azcore.ResponseError
+		if azcore.As(err, &respErr) && respErr.ErrorCode == "BlobNotFound" {
+			return nil // Blob doesn't exist, deletion successful
+		}
+		
+		if i < maxRetries-1 {
+			logrus.Warnf("Delete attempt %d failed, retrying: %v", i+1, err)
+			time.Sleep(time.Duration(i+1) * time.Second)
+		}
+	}
+	
+	if err != nil {
+		return fmt.Errorf("failed to delete file after %d attempts: %w", maxRetries, err)
+	}
+	
+	logrus.Debugf("Successfully deleted file from Azure Blob: %s", storagePath)
+	return nil
+}
+
+// GenerateDownloadURL creates a SAS URL for secure, time-limited downloads
+func (s *AzureStorageService) GenerateDownloadURL(ctx context.Context, storagePath string, expiry time.Duration) (string, error) {
+	blobClient := s.client.ServiceClient().NewContainerClient(s.containerName).NewBlobClient(storagePath)
+	
+	// Check if blob exists
+	_, err := blobClient.GetProperties(ctx, &blob.GetPropertiesOptions{})
+	if err != nil {
+		return "", fmt.Errorf("blob not found: %w", err)
+	}
+	
+	// Create SAS token with read permission
+	sasURL, err := blobClient.GetSASURL(sas.BlobPermissions{Read: true}, time.Now().Add(expiry), &blob.GetSASURLOptions{})
+	if err != nil {
+		return "", fmt.Errorf("failed to generate SAS URL: %w", err)
+	}
+	
+	return sasURL, nil
+}
+
+// GetFileInfo retrieves metadata about a file
+func (s *AzureStorageService) GetFileInfo(ctx context.Context, storagePath string) (*FileInfo, error) {
+	blobClient := s.client.ServiceClient().NewContainerClient(s.containerName).NewBlobClient(storagePath)
+	
+	properties, err := blobClient.GetProperties(ctx, &blob.GetPropertiesOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("failed to get blob properties: %w", err)
+	}
+	
+	info := &FileInfo{
+		Size:         *properties.ContentLength,
+		ContentType:  getStringValue(properties.ContentType),
+		LastModified: *properties.LastModified,
+		ETag:         string(*properties.ETag),
+	}
+	
+	return info, nil
+}
+
+// FileInfo represents file metadata
+type FileInfo struct {
+	Size         int64     `json:"size"`
+	ContentType  string    `json:"content_type"`
+	LastModified time.Time `json:"last_modified"`
+	ETag         string    `json:"etag"`
+}
+
+// Helper function to safely get string value from pointer
+func getStringValue(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
+}
+
+// Helper package for string pointers (simulating Azure's to package)
+var to = struct {
+	StringPtr func(string) *string
+}{
+	StringPtr: func(s string) *string { return &s },
+}

@@ -1,0 +1,148 @@
+scalar Time
+scalar UUID
+
+type File {
+  id: UUID!
+  contentHash: String!
+  filename: String!
+  originalMimeType: String!
+  detectedMimeType: String!
+  fileSize: Int!
+  storagePath: String!
+  uploadDate: Time!
+  createdAt: Time!
+  updatedAt: Time!
+}
+
+type UserFile {
+  id: UUID!
+  userID: UUID!
+  fileID: UUID!
+  userFilename: String!
+  uploadDate: Time!
+  isDeleted: Boolean!
+  folderPath: String!
+  createdAt: Time!
+  updatedAt: Time!
+  file: File!
+}
+
+type UserStorageStats {
+  id: UUID!
+  userID: UUID!
+  totalFiles: Int!
+  uniqueFiles: Int!
+  totalSizeBytes: Int!
+  actualStorageBytes: Int!
+  savingsBytes: Int!
+  savingsPercentage: Float!
+  lastCalculated: Time!
+}
+
+type UploadSession {
+  id: UUID!
+  userID: UUID!
+  sessionToken: String!
+  totalFiles: Int!
+  completedFiles: Int!
+  failedFiles: Int!
+  totalBytes: Int!
+  uploadedBytes: Int!
+  status: String!
+  startedAt: Time!
+  completedAt: Time
+}
+
+type UploadProgress {
+  sessionID: UUID!
+  sessionToken: String!
+  totalFiles: Int!
+  completedFiles: Int!
+  failedFiles: Int!
+  totalBytes: Int!
+  uploadedBytes: Int!
+  status: String!
+  progressPercent: Float!
+}
+
+input FileUploadInput {
+  filename: String!
+  mimeType: String!
+  fileSize: Int!
+  folderPath: String
+  contentHash: String
+}
+
+input UploadSessionInput {
+  files: [FileUploadInput!]!
+  totalBytes: Int!
+}
+
+type UploadFileResult {
+  success: Boolean!
+  userFileID: UUID
+  fileID: UUID
+  contentHash: String
+  fileSize: Int!
+  isExisting: Boolean!
+  savingsBytes: Int!
+  storagePath: String
+  errors: [String!]
+  warnings: [String!]
+}
+
+type User {
+  id: UUID!
+  email: String!
+  firstName: String!
+  lastName: String!
+  isActive: Boolean!
+  createdAt: Time!
+  updatedAt: Time!
+  storageStats: UserStorageStats
+}
+
+type Organization {
+  id: UUID!
+  name: String!
+  description: String
+  isActive: Boolean!
+  createdAt: Time!
+  updatedAt: Time!
+}
+
+type AuthPayload {
+  token: String!
+  user: User!
+}
+
+input RegisterInput {
+  email: String!
+  password: String!
+  firstName: String!
+  lastName: String!
+}
+
+input LoginInput {
+  email: String!
+  password: String!
+}
+
+type Query {
+  me: User
+  user(id: UUID!): User
+  userFiles(folderPath: String, limit: Int, offset: Int): [UserFile!]!
+  userFile(id: UUID!): UserFile
+  uploadProgress(sessionToken: String!): UploadProgress
+  uploadSession(sessionToken: String!): UploadSession
+  storageStats: UserStorageStats!
+}
+
+type Mutation {
+  register(input: RegisterInput!): AuthPayload!
+  login(input: LoginInput!): AuthPayload!
+  logout: Boolean!
+  createUploadSession(input: UploadSessionInput!): UploadSession!
+  completeUploadSession(sessionToken: String!): Boolean!
+  deleteFile(userFileID: UUID!): Boolean!
+}

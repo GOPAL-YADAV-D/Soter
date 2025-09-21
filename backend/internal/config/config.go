@@ -31,9 +31,9 @@ type Config struct {
 	JWTSecret string
 
 	// Rate Limiting
-	RateLimitRPS      int
-	RateLimitBurst    int
-	StorageQuotaMB    int
+	RateLimitRPS   int
+	RateLimitBurst int
+	StorageQuotaMB int
 
 	// Logging
 	LogLevel string
@@ -58,11 +58,11 @@ func LoadConfig() *Config {
 		DBName:     getEnv("DB_NAME", "soter"),
 		DBSSLMode:  getEnv("DB_SSLMODE", "disable"),
 
-		// Azure Storage defaults (Azurite for local development)
-		AzureStorageAccount:   getEnv("AZURE_STORAGE_ACCOUNT", "devstoreaccount1"),
-		AzureStorageKey:       getEnv("AZURE_STORAGE_KEY", "Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw=="),
-		AzureStorageContainer: getEnv("AZURE_STORAGE_CONTAINER", "files"),
-		AzureStorageEndpoint:  getEnv("AZURE_STORAGE_ENDPOINT", "http://localhost:10000/devstoreaccount1"),
+		// Azure Storage configuration (switches based on STORAGE_ENVIRONMENT)
+		AzureStorageAccount:   getAzureStorageAccount(),
+		AzureStorageKey:       getAzureStorageKey(),
+		AzureStorageContainer: getAzureStorageContainer(),
+		AzureStorageEndpoint:  getAzureStorageEndpoint(),
 
 		// Security defaults
 		JWTSecret: getEnv("JWT_SECRET", "your-secret-key-change-this-in-production"),
@@ -93,4 +93,33 @@ func getEnvAsInt(key string, defaultValue int) int {
 		}
 	}
 	return defaultValue
+}
+
+// Azure Storage helper functions that switch based on STORAGE_ENVIRONMENT
+func getAzureStorageAccount() string {
+	if getEnv("STORAGE_ENVIRONMENT", "local") == "production" {
+		return getEnv("AZURE_STORAGE_ACCOUNT", "")
+	}
+	return getEnv("AZURITE_STORAGE_ACCOUNT", "devstoreaccount1")
+}
+
+func getAzureStorageKey() string {
+	if getEnv("STORAGE_ENVIRONMENT", "local") == "production" {
+		return getEnv("AZURE_STORAGE_KEY", "")
+	}
+	return getEnv("AZURITE_STORAGE_KEY", "Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==")
+}
+
+func getAzureStorageContainer() string {
+	if getEnv("STORAGE_ENVIRONMENT", "local") == "production" {
+		return getEnv("AZURE_STORAGE_CONTAINER", "files")
+	}
+	return getEnv("AZURITE_STORAGE_CONTAINER", "files")
+}
+
+func getAzureStorageEndpoint() string {
+	if getEnv("STORAGE_ENVIRONMENT", "local") == "production" {
+		return getEnv("AZURE_STORAGE_ENDPOINT", "")
+	}
+	return getEnv("AZURITE_STORAGE_ENDPOINT", "http://localhost:10000/devstoreaccount1")
 }

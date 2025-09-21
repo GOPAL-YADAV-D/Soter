@@ -19,6 +19,33 @@ func NewUserRepository(db *gorm.DB) *UserRepository {
 	}
 }
 
+func (r *UserRepository) GetByID(id uuid.UUID) (*models.User, error) {
+	var user models.User
+	if err := r.db.Where("id = ?", id).First(&user).Error; err != nil {
+		if err == gorm.ErrRecordNotFound {
+			return nil, fmt.Errorf("user not found")
+		}
+		return nil, err
+	}
+	return &user, nil
+}
+
+func (r *UserRepository) Create(user *models.User) (*models.User, error) {
+	if err := r.db.Create(user).Error; err != nil {
+		return nil, err
+	}
+	return user, nil
+}
+
+func (r *UserRepository) UpdateLastLogin(userID uuid.UUID) error {
+	now := time.Now()
+	return r.db.Model(&models.User{}).Where("id = ?", userID).Update("last_login", now).Error
+}
+
+func (r *UserRepository) AssignUserToOrganization(userOrg *models.UserOrganization) error {
+	return r.db.Create(userOrg).Error
+}
+
 func (r *UserRepository) GetByEmail(email string) (*models.User, error) {
 	var user models.User
 	if err := r.db.Where("email = ?", email).First(&user).Error; err != nil {

@@ -9,142 +9,144 @@ import (
 
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/joho/godotenv"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 
 	"github.com/GOPAL-YADAV-D/Soter/internal/auth"
+	"github.com/GOPAL-YADAV-D/Soter/internal/handlers"
 	"github.com/GOPAL-YADAV-D/Soter/internal/models"
 	"github.com/GOPAL-YADAV-D/Soter/internal/repository"
+	"github.com/GOPAL-YADAV-D/Soter/internal/services"
 )
 
-type Server struct {
-	db          *gorm.DB
-	authService *auth.AuthService
-	userRepo    *repository.UserRepository
-}
-
-type LoginRequest struct {
-	Email    string `json:"email" binding:"required,email"`
-	Password string `json:"password" binding:"required"`
-}
-
-type RegisterRequest struct {
-	Name                    string `json:"name" binding:"required"`
-	Username                string `json:"username" binding:"required"`
-	Email                   string `json:"email" binding:"required,email"`
-	Password                string `json:"password" binding:"required,min=6"`
-	OrganizationName        string `json:"organizationName" binding:"required"`
-	OrganizationDescription string `json:"organizationDescription"`
-}
-
-type AuthResponse struct {
-	User      *models.User    `json:"user"`
-	TokenPair *auth.TokenPair `json:"tokenPair"`
-	Message   string          `json:"message"`
-}
-
-func (s *Server) login(c *gin.Context) {
-	var req LoginRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
+func setupRoutes(
+	authHandler *handlers.AuthHandler,
+	orgHandler *handlers.OrganizationHandler,
+	fileHandler *handlers.FileHandler,
+	authService *auth.AuthService,
+) *gin.Engine {
+	if os.Getenv("GIN_MODE") == "release" {
+		gin.SetMode(gin.ReleaseMode)
 	}
 
-	user, err := s.userRepo.GetByEmail(req.Email)
-	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid credentials"})
-		return
-	}
+	r := gin.Default()
 
-	if !s.authService.CheckPassword(req.Password, user.PasswordHash) {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid credentials"})
-		return
-	}
+	// Configure CORS for React frontend
+	r.Use(cors.New(cors.Config{
+		AllowOrigins:     []string{"http://localhost:3000", "http://localhost:5173"},
+		AllowMethods:     []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
+		AllowHeaders:     []string{"Origin", "Content-Type", "Accept", "Authorization"},
+		ExposeHeaders:    []string{"Content-Length"},
+		AllowCredentials: true,
+		MaxAge:           12 * time.Hour,
+	}))
 
-	tokenPair, err := s.authService.GenerateTokenPair(user.ID.String(), user.Username, user.Email)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to generate tokens"})
-		return
-	}
-
-	c.JSON(http.StatusOK, AuthResponse{
-		User:      user,
-		TokenPair: tokenPair,
-		Message:   "Login successful",
+	// Health check routes
+	r.GET("/healthz", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{
+			"status":    "healthy",
+			"service":   "Secure File Vault API",
+			"timestamp": time.Now().Format(time.RFC3339),
+		})
 	})
+	r.GET("/health", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{
+			"status":    "healthy",
+			"service":   "Secure File Vault API",
+			"timestamp": time.Now().Format(time.RFC3339),
+		})
+	})
+
+	// API routes
+	api := r.Group("/api/v1")
+
+	// Authentication routes (public)
+	auth := api.Group("/auth")
+	{
+		auth.POST("/register", authHandler.Register)
+		auth.POST("/login", authHandler.Login)
+		auth.POST("/refresh", authHandler.RefreshToken)
+		auth.POST("/logout", authHandler.Logout)
+	}
+
+	// Protected routes (require authentication)
+	protected := api.Group("/")
+	protected.Use(authMiddleware(authService)) // Pass authService to middleware
+
+	// User profile routes
+	protected.GET("/profile", authHandler.GetUserProfile)
+
+	// Organization routes
+	org := protected.Group("/organization")
+	{
+		org.GET("/info", orgHandler.GetOrganizationInfo)
+		org.GET("/storage", orgHandler.GetStorageUsage)
+		org.GET("/list", orgHandler.ListOrganizations)
+		org.POST("/groups", orgHandler.CreateGroup)
+	}
+
+	// File management routes
+	files := protected.Group("/files")
+	{
+		files.POST("/upload-session", fileHandler.CreateUploadSession)
+		files.POST("/upload/:sessionToken", fileHandler.UploadFile)
+		files.POST("/upload-session/:sessionToken/complete", fileHandler.CompleteUploadSession)
+		files.GET("/upload-session/:sessionToken/progress", fileHandler.GetUploadProgress)
+		files.GET("", fileHandler.GetFiles)  // Remove trailing slash to avoid redirect
+		files.GET("/", fileHandler.GetFiles) // Also handle with trailing slash
+		files.GET("/:fileId", fileHandler.GetFileMetadata)
+		files.GET("/:fileId/download", fileHandler.DownloadFile)
+		files.DELETE("/:fileId", fileHandler.DeleteFile)
+	}
+
+	return r
 }
 
-func (s *Server) register(c *gin.Context) {
-	var req RegisterRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
+// authMiddleware validates JWT tokens and sets user context
+func authMiddleware(authService *auth.AuthService) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		authHeader := c.GetHeader("Authorization")
+		if authHeader == "" {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "Authorization header required"})
+			c.Abort()
+			return
+		}
+
+		// Extract token from "Bearer <token>"
+		tokenString := ""
+		if len(authHeader) > 7 && authHeader[:7] == "Bearer " {
+			tokenString = authHeader[7:]
+		} else {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid authorization header format"})
+			c.Abort()
+			return
+		}
+
+		// Validate token
+		claims, err := authService.ValidateToken(tokenString)
+		if err != nil {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid token"})
+			c.Abort()
+			return
+		}
+
+		// Parse user ID as UUID
+		userID, err := uuid.Parse(claims.UserID)
+		if err != nil {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid user ID in token"})
+			c.Abort()
+			return
+		}
+
+		// Set user context
+		c.Set("userID", userID)
+		c.Set("username", claims.Username)
+		c.Set("email", claims.Email)
+
+		c.Next()
 	}
-
-	// Check if user already exists
-	existingUser, _ := s.userRepo.GetByEmail(req.Email)
-	if existingUser != nil {
-		c.JSON(http.StatusConflict, gin.H{"error": "User already exists"})
-		return
-	}
-
-	existingUser, _ = s.userRepo.GetByUsername(req.Username)
-	if existingUser != nil {
-		c.JSON(http.StatusConflict, gin.H{"error": "Username already taken"})
-		return
-	}
-
-	// Hash password
-	hashedPassword, err := s.authService.HashPassword(req.Password)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to hash password"})
-		return
-	}
-
-	// Create organization first
-	org, err := s.userRepo.CreateOrganizationWithUser(
-		req.OrganizationName,
-		req.OrganizationDescription,
-		req.Name,
-		req.Username,
-		req.Email,
-		hashedPassword,
-	)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create user and organization"})
-		return
-	}
-
-	// Get the created user
-	user, err := s.userRepo.GetByEmail(req.Email)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve created user"})
-		return
-	}
-
-	// Generate tokens
-	tokenPair, err := s.authService.GenerateTokenPair(user.ID.String(), user.Username, user.Email)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to generate tokens"})
-		return
-	}
-
-	log.Printf("User registered successfully: %s (Organization: %s)", user.Email, org.Name)
-
-	c.JSON(http.StatusCreated, AuthResponse{
-		User:      user,
-		TokenPair: tokenPair,
-		Message:   "Registration successful",
-	})
-}
-
-func (s *Server) health(c *gin.Context) {
-	c.JSON(http.StatusOK, gin.H{
-		"status":    "healthy",
-		"service":   "Secure File Vault API",
-		"timestamp": time.Now().Format(time.RFC3339),
-	})
 }
 
 func main() {
@@ -169,52 +171,74 @@ func main() {
 	}
 
 	// Auto migrate models
-	db.AutoMigrate(&models.User{}, &models.Organization{})
+	err = db.AutoMigrate(
+		&models.User{},
+		&models.Organization{},
+		&models.UserOrganization{},
+		&models.Group{},
+		&models.UserGroup{},
+		&models.File{},
+		&models.UserFile{},
+		&models.FileGroupPermission{},
+		&models.OrganizationStorageStats{},
+		&models.UploadSession{},
+		&models.UserStorageStats{},
+	)
+	if err != nil {
+		log.Fatal("Failed to migrate database:", err)
+	}
+
+	// Initialize repositories
+	userRepo := repository.NewUserRepository(db)
+	orgRepo := repository.NewOrganizationRepository(db)
+	groupRepo := repository.NewGroupRepository(db)
+	fileRepo := repository.NewFileRepository(db)
 
 	// Initialize services
-	authService := auth.NewAuthService(
-		os.Getenv("JWT_SECRET"),
+	authService := auth.NewAuthService(os.Getenv("JWT_SECRET"))
+
+	storagePath := os.Getenv("STORAGE_PATH")
+	if storagePath == "" {
+		storagePath = "./storage" // Default storage path
+	}
+	storageService, err := services.NewStorageService(storagePath)
+	if err != nil {
+		log.Fatal("Failed to initialize storage service:", err)
+	}
+
+	validationService := services.NewFileValidationService()
+	uploadService := services.NewFileUploadService(
+		fileRepo,
+		storageService,
+		validationService,
+		userRepo,
 	)
-	userRepo := repository.NewUserRepository(db)
 
-	server := &Server{
-		db:          db,
-		authService: authService,
-		userRepo:    userRepo,
-	}
+	// Initialize handlers
+	authHandler := handlers.NewAuthHandler(userRepo, orgRepo, groupRepo, authService)
+	orgHandler := handlers.NewOrganizationHandler(orgRepo, userRepo, groupRepo)
+	fileHandler := handlers.NewFileHandler(
+		fileRepo,
+		userRepo,
+		orgRepo,
+		groupRepo,
+		uploadService,
+		validationService,
+	)
 
-	// Setup Gin
-	if os.Getenv("GIN_MODE") == "release" {
-		gin.SetMode(gin.ReleaseMode)
-	}
-
-	r := gin.Default()
-
-	// Configure CORS
-	r.Use(cors.New(cors.Config{
-		AllowOrigins:     []string{"http://localhost:3000"},
-		AllowMethods:     []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
-		AllowHeaders:     []string{"Origin", "Content-Type", "Accept", "Authorization"},
-		ExposeHeaders:    []string{"Content-Length"},
-		AllowCredentials: true,
-		MaxAge:           12 * time.Hour,
-	}))
-
-	// Routes
-	api := r.Group("/api/v1")
-	{
-		api.POST("/auth/login", server.login)
-		api.POST("/auth/register", server.register)
-	}
-
-	r.GET("/healthz", server.health)
-	r.GET("/health", server.health)
+	// Setup routes
+	r := setupRoutes(authHandler, orgHandler, fileHandler, authService)
 
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8080"
 	}
 
-	log.Printf("Server starting on port %s", port)
-	log.Fatal(r.Run(":" + port))
+	log.Printf("🚀 Server starting on port %s", port)
+	log.Printf("📊 Dashboard URL: http://localhost:%s/health", port)
+	log.Printf("🔧 Environment: %s", gin.Mode())
+
+	if err := r.Run(":" + port); err != nil {
+		log.Fatal("Failed to start server:", err)
+	}
 }

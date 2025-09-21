@@ -28,26 +28,37 @@ type User struct {
 	OrganizationID uuid.UUID  `json:"organization_id" gorm:"type:uuid"` // Primary organization
 	CreatedAt      time.Time  `json:"created_at"`
 	UpdatedAt      time.Time  `json:"updated_at"`
+
+	// Relationships
+	Organizations []Organization `gorm:"many2many:user_organizations;" json:"organizations,omitempty"`
+	Groups        []Group        `gorm:"many2many:user_groups;" json:"groups,omitempty"`
+	Files         []UserFile     `gorm:"foreignKey:UserID" json:"files,omitempty"`
 }
 
 // Organization represents an organization in the system
 type Organization struct {
-	ID              uuid.UUID  `json:"id" gorm:"primary_key;type:uuid;default:uuid_generate_v4()"`
-	Name            string     `json:"name" gorm:"size:100;unique;not null"`
-	Description     *string    `json:"description" gorm:"type:text"`
-	CreatedByUserID *uuid.UUID `json:"created_by_user_id" gorm:"type:uuid"`
-	IsActive        bool       `json:"is_active" gorm:"default:true"`
-	CreatedAt       time.Time  `json:"created_at"`
-	UpdatedAt       time.Time  `json:"updated_at"`
+	ID               uuid.UUID  `json:"id" gorm:"primary_key;type:uuid;default:uuid_generate_v4()"`
+	Name             string     `json:"name" gorm:"size:100;unique;not null"`
+	Description      *string    `json:"description" gorm:"type:text"`
+	CreatedByUserID  *uuid.UUID `json:"created_by_user_id" gorm:"type:uuid"`
+	AllocatedSpaceMB int        `json:"allocated_space_mb" gorm:"default:100"`
+	UsedSpaceMB      int        `json:"used_space_mb" gorm:"default:0"`
+	IsActive         bool       `json:"is_active" gorm:"default:true"`
+	CreatedAt        time.Time  `json:"created_at"`
+	UpdatedAt        time.Time  `json:"updated_at"`
+
+	// Relationships
+	Users  []User  `gorm:"many2many:user_organizations;" json:"users,omitempty"`
+	Groups []Group `gorm:"foreignKey:OrganizationID" json:"groups,omitempty"`
 }
 
 // UserOrganization represents the relationship between users and organizations
 type UserOrganization struct {
-	ID             uuid.UUID `json:"id" db:"id"`
-	UserID         uuid.UUID `json:"user_id" db:"user_id"`
-	OrganizationID uuid.UUID `json:"organization_id" db:"organization_id"`
-	Role           UserRole  `json:"role" db:"role"`
-	JoinedAt       time.Time `json:"joined_at" db:"joined_at"`
+	ID             uuid.UUID `json:"id" gorm:"primary_key;type:uuid;default:uuid_generate_v4()"`
+	UserID         uuid.UUID `json:"user_id" gorm:"type:uuid;not null"`
+	OrganizationID uuid.UUID `json:"organization_id" gorm:"type:uuid;not null"`
+	Role           UserRole  `json:"role" gorm:"type:varchar(20);default:'MEMBER'"`
+	JoinedAt       time.Time `json:"joined_at" gorm:"default:CURRENT_TIMESTAMP"`
 }
 
 // RefreshToken represents a refresh token for JWT authentication
